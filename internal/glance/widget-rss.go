@@ -16,6 +16,8 @@ import (
 
 	"github.com/mmcdole/gofeed"
 	gofeedext "github.com/mmcdole/gofeed/extensions"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 var (
@@ -166,6 +168,63 @@ func (f rssFeedItemList) sortByNewest() rssFeedItemList {
 
 var feedParser = gofeed.NewParser()
 
+func fetchFirstImageFromRSSItem(itemLink string, request rssFeedRequest) (string, error) {
+
+	if itemLink == "" {
+		return "", fmt.Errorf("item link is empty")
+	}
+
+	req, err := http.NewRequest("GET", itemLink, nil)
+	if err != nil {
+		return "", err
+	}
+
+	for key, value := range request.Headers {
+		req.Header.Add(key, value)
+	}
+
+	resp, err := defaultHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("ERROR: Failed to scrape image from RSS article page: %s\n", itemLink)
+		return "", fmt.Errorf("failed to fetch HTML page: status %d", resp.StatusCode)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	imgSrc := ""
+	doc.Find("article img, main img, .post-content img").EachWithBreak(func(i int, s *goquery.Selection) bool {
+		src, srcExists := s.Attr("src")
+		if srcExists && src != "" {
+			imgSrc = src
+			return false
+		}
+		return true
+	})
+
+	if imgSrc == "" {
+		return "", fmt.Errorf("no image found on page")
+	}
+
+	baseURL, err := url.Parse(itemLink)
+	if err == nil {
+		resolvedURL, err := baseURL.Parse(imgSrc)
+		if err == nil {
+			return resolvedURL.String(), nil
+		}
+	}
+
+	fmt.Printf("DEBUG: Returning raw image src: %s\n", imgSrc)
+	return imgSrc, nil
+}
+
 func fetchItemsFromRSSFeedTask(request rssFeedRequest) ([]rssFeedItem, error) {
 	req, err := http.NewRequest("GET", request.URL, nil)
 	if err != nil {
@@ -277,6 +336,12 @@ func fetchItemsFromRSSFeedTask(request rssFeedRequest) ([]rssFeedItem, error) {
 				rssItem.ImageURL = strings.TrimRight(feed.Link, "/") + feed.Image.URL
 			} else {
 				rssItem.ImageURL = feed.Image.URL
+			}
+		} else {
+			imageURL, err := fetchFirstImageFromRSSItem(rssItem.Link, request)
+			if err != nil {
+			} else {
+				rssItem.ImageURL = imageURL
 			}
 		}
 
