@@ -168,18 +168,23 @@ func (f rssFeedItemList) sortByNewest() rssFeedItemList {
 
 var feedParser = gofeed.NewParser()
 
-func fetchFirstImageFromRSSItem(itemLink string, request rssFeedRequest) (string, error) {
+type fetchFirstImageFromRSSItemInput struct {
+	ItemLink string
+	Request  rssFeedRequest
+}
 
-	if itemLink == "" {
+func fetchFirstImageFromRSSItem(input fetchFirstImageFromRSSItemInput) (string, error) {
+
+	if input.ItemLink == "" {
 		return "", fmt.Errorf("item link is empty")
 	}
 
-	req, err := http.NewRequest("GET", itemLink, nil)
+	req, err := http.NewRequest("GET", input.ItemLink, nil)
 	if err != nil {
 		return "", err
 	}
 
-	for key, value := range request.Headers {
+	for key, value := range input.Request.Headers {
 		req.Header.Add(key, value)
 	}
 
@@ -190,7 +195,7 @@ func fetchFirstImageFromRSSItem(itemLink string, request rssFeedRequest) (string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("ERROR: Failed to scrape image from RSS article page: %s\n", itemLink)
+		fmt.Printf("ERROR: Failed to scrape image from RSS article page: %s\n", input.ItemLink)
 		return "", fmt.Errorf("failed to fetch HTML page: status %d", resp.StatusCode)
 	}
 
@@ -213,7 +218,7 @@ func fetchFirstImageFromRSSItem(itemLink string, request rssFeedRequest) (string
 		return "", fmt.Errorf("no image found on page")
 	}
 
-	baseURL, err := url.Parse(itemLink)
+	baseURL, err := url.Parse(input.ItemLink)
 	if err == nil {
 		resolvedURL, err := baseURL.Parse(imgSrc)
 		if err == nil {
@@ -260,6 +265,8 @@ func fetchItemsFromRSSFeedTask(request rssFeedRequest) ([]rssFeedItem, error) {
 	}
 
 	items := make(rssFeedItemList, 0, len(feed.Items))
+
+	var feedIncludesImage bool = true
 
 	for i := range feed.Items {
 		item := feed.Items[i]
@@ -338,11 +345,7 @@ func fetchItemsFromRSSFeedTask(request rssFeedRequest) ([]rssFeedItem, error) {
 				rssItem.ImageURL = feed.Image.URL
 			}
 		} else {
-			imageURL, err := fetchFirstImageFromRSSItem(rssItem.Link, request)
-			if err != nil {
-			} else {
-				rssItem.ImageURL = imageURL
-			}
+			feedIncludesImage = false
 		}
 
 		if item.PublishedParsed != nil {
@@ -352,6 +355,44 @@ func fetchItemsFromRSSFeedTask(request rssFeedRequest) ([]rssFeedItem, error) {
 		}
 
 		items = append(items, rssItem)
+	}
+
+	if !feedIncludesImage {
+
+		inputs := []fetchFirstImageFromRSSItemInput{}
+
+		var articleURLs []string
+		for _, item := range items {
+			articleURLs = append(articleURLs, item.Link)
+			inputs = append(inputs, fetchFirstImageFromRSSItemInput{
+				ItemLink: item.Link,
+				Request:  request,
+			})
+		}
+
+		job := newJob(fetchFirstImageFromRSSItem, inputs).withWorkers(30)
+
+		images, errs, err := workerPoolDo(job)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errNoContent, err)
+		}
+
+		failed := 0
+		for i := range images {
+			if errs[i] != nil {
+				failed++
+				slog.Error("Failed to scrape an image from article, error", errs[i])
+				continue
+			}
+
+			if failed > 0 {
+				slog.Error("Failed to scrape ", failed, " images from article pages")
+			}
+
+			items[i].ImageURL = images[i]
+
+		}
+
 	}
 
 	return items, nil
